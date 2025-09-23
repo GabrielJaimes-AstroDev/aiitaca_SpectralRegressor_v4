@@ -496,15 +496,17 @@ def create_comparison_plot(predictions, uncertainties, param, label, spectrum_na
 
         mean_true = pred_value  # Use the predicted value itself
         uncert_value = param_uncerts.get(model_name, 0)
-        
+
         ax.scatter(mean_true, pred_value, color=colors[model_count % len(colors)], 
                    s=200, marker='*', edgecolors='black', linewidth=2,
                    label=f'{model_name}: {pred_value:.3f} ± {uncert_value:.3f}')
 
-        ax.errorbar(mean_true, pred_value, yerr=uncert_value, 
-                    fmt='none', ecolor=colors[model_count % len(colors)], 
-                    capsize=8, capthick=2, elinewidth=3, alpha=0.8)
-        
+        # Solo mostrar barras de error para Random Forest
+        if model_name.lower() == 'randomforest':
+            ax.errorbar(mean_true, pred_value, yerr=uncert_value, 
+                        fmt='none', ecolor=colors[model_count % len(colors)], 
+                        capsize=8, capthick=2, elinewidth=3, alpha=0.8)
+
         model_count += 1
     
     param_label = get_param_label(param)
@@ -616,12 +618,14 @@ def create_summary_plot(predictions, uncertainties, param_names, param_labels, s
             continue
 
         x_pos = np.arange(len(filtered_models))
-        bars = ax.bar(x_pos, filtered_values, yerr=filtered_errors, capsize=8, alpha=0.8, 
+        # Solo agregar barras de error para Random Forest
+        error_array = [err if name.lower() == 'randomforest' else 0 for name, err in zip(filtered_models, filtered_errors)]
+        bars = ax.bar(x_pos, filtered_values, yerr=error_array, capsize=8, alpha=0.8, 
                      color=filtered_colors, edgecolor='black', linewidth=1)
-        
+
         param_label = get_param_label(param)
         units = get_units(param)
-        
+
         if expected_values and param in expected_values and expected_values[param]['value'] is not None:
             exp_value = expected_values[param]['value']
             exp_error = expected_values[param].get('error', 0)
