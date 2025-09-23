@@ -603,12 +603,15 @@ def create_summary_plot(predictions, uncertainties, param_names, param_labels, s
         filtered_errors = []
         filtered_colors = []
         
+        # Normalizar nombres de modelos a minúsculas para comparación y color
+        selected_models_lower = [m.lower() for m in selected_models]
         for model_name, pred_value in param_preds.items():
-            if model_name in selected_models:
+            model_name_lower = model_name.lower()
+            if model_name_lower in selected_models_lower:
                 filtered_models.append(model_name)
                 filtered_values.append(pred_value)
                 filtered_errors.append(param_uncerts.get(model_name, 0))
-                filtered_colors.append(model_colors.get(model_name, '#9467bd'))  # Púrpura por defecto
+                filtered_colors.append(model_colors.get(model_name_lower.capitalize(), '#9467bd'))  # Púrpura por defecto
         
         if not filtered_models:
             ax.text(0.5, 0.5, 'No selected models for this parameter', 
@@ -616,6 +619,7 @@ def create_summary_plot(predictions, uncertainties, param_names, param_labels, s
             ax.set_title(f'{get_param_label(param)} - No selected models', 
                         fontfamily='Times New Roman', fontsize=14, fontweight='bold')
             continue
+
 
         x_pos = np.arange(len(filtered_models))
         # Solo agregar barras de error para Random Forest
