@@ -1145,15 +1145,14 @@ def main():
                         st.subheader("Prediction Summary")
                         
                         summary_data = []
+                        selected_models_lower = [m.lower() for m in st.session_state.selected_models]
                         for param, label in zip(results['param_names'], results['param_labels']):
                             if param in results['predictions']:
                                 param_preds = results['predictions'][param]
                                 param_uncerts = results['uncertainties'].get(param, {})
-                                
                                 for model_name, pred_value in param_preds.items():
-                                    if model_name not in st.session_state.selected_models:
+                                    if model_name.lower() not in selected_models_lower:
                                         continue
-                                    
                                     uncert_value = param_uncerts.get(model_name, np.nan)
                                     summary_data.append({
                                         'Parameter': label,
@@ -1188,12 +1187,13 @@ def main():
                         if has_expected_values:
                             st.info("Red line shows expected value with shaded uncertainty range")
                         
+                        # Pasar los modelos seleccionados normalizados a la función de plot
                         summary_fig = create_summary_plot(
                             results['predictions'],
                             results['uncertainties'],
                             results['param_names'],
                             results['param_labels'],
-                            st.session_state.selected_models,
+                            [m for m in st.session_state.selected_models],
                             st.session_state.expected_values if has_expected_values else None
                         )
                         st.pyplot(summary_fig)
