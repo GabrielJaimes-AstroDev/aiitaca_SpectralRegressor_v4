@@ -654,11 +654,11 @@ def create_summary_plot(predictions, uncertainties, param_names, param_labels, s
         ax.set_xticklabels(filtered_models, rotation=45, ha='right', fontsize=10)
         ax.grid(alpha=0.3, axis='y', linestyle='--')
 
-        # Add value labels on bars para todos los modelos (caja amarilla), pero solo mostrar ± error para RandomForest
+        # Siempre dibujar la caja amarilla para cada barra, usando el valor de la barra
         ylim = ax.get_ylim()
         y_max = max([bar.get_height() + err for bar, err in zip(bars, filtered_errors)] + [ylim[1]])
         ax.set_ylim(ylim[0], y_max + 0.15 * abs(y_max))
-        for i, (bar, value, error, name) in enumerate(zip(bars, filtered_values, filtered_errors, filtered_models)):
+        for bar, value, error, name in zip(bars, filtered_values, filtered_errors, filtered_models):
             height = bar.get_height()
             y_text = height + error + 0.1
             va = 'bottom'
@@ -666,7 +666,7 @@ def create_summary_plot(predictions, uncertainties, param_names, param_labels, s
                 y_text = height - error - 0.1
                 va = 'top'
             # Mostrar ± error solo para RandomForest
-            if name.lower() == 'randomforest':
+            if str(name).lower() == 'randomforest':
                 label_text = f'{value:.3f} ± {error:.3f}'
             else:
                 label_text = f'{value:.3f}'
