@@ -645,13 +645,22 @@ def create_summary_plot(predictions, uncertainties, param_names, param_labels, s
         ax.set_xticklabels(filtered_models, rotation=45, ha='right', fontsize=10)
         ax.grid(alpha=0.3, axis='y', linestyle='--')
         
-        # Add value labels on bars
+        # Add value labels on bars con ajuste inteligente para no salirse del plot
+        ylim = ax.get_ylim()
+        y_max = max([bar.get_height() + err for bar, err in zip(bars, filtered_errors)] + [ylim[1]])
+        ax.set_ylim(ylim[0], y_max + 0.15 * abs(y_max))
         for i, (bar, value, error) in enumerate(zip(bars, filtered_values, filtered_errors)):
             height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height + error + 0.1,
-                   f'{value:.3f} ± {error:.3f}', ha='center', va='bottom', 
-                   fontweight='bold', fontsize=9, bbox=dict(boxstyle="round,pad=0.3", 
-                   facecolor="yellow", alpha=0.7))
+            # Si la etiqueta se saldría del plot, ponerla dentro de la barra
+            y_text = height + error + 0.1
+            va = 'bottom'
+            if y_text > ax.get_ylim()[1]:
+                y_text = height - error - 0.1
+                va = 'top'
+            ax.text(bar.get_x() + bar.get_width()/2., y_text,
+                    f'{value:.3f} ± {error:.3f}', ha='center', va=va, 
+                    fontweight='bold', fontsize=9, bbox=dict(boxstyle="round,pad=0.3", 
+                    facecolor="yellow", alpha=0.7), clip_on=True)
         
         # Add legend if expected value is shown
         if expected_values and param in expected_values and expected_values[param]['value'] is not None:
