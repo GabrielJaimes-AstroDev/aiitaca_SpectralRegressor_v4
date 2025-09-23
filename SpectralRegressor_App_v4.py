@@ -598,28 +598,34 @@ def create_summary_plot(predictions, uncertainties, param_names, param_labels, s
         param_preds = predictions[param]
         param_uncerts = uncertainties[param]
 
+        # Normalizar nombres de modelos a minúsculas para comparación
+        selected_models_lower = [m.lower() for m in selected_models]
+        # Crear un mapeo de nombre normalizado a nombre original para anotaciones
+        param_preds_lower = {k.lower(): (k, v) for k, v in param_preds.items()}
+        param_uncerts_lower = {k.lower(): v for k, v in param_uncerts.items()}
+
         filtered_models = []
         filtered_values = []
         filtered_errors = []
         filtered_colors = []
-        
-        # Normalizar nombres de modelos a minúsculas para comparación y color
-        selected_models_lower = [m.lower() for m in selected_models]
-        for model_name, pred_value in param_preds.items():
-            model_name_lower = model_name.lower()
-            if model_name_lower in selected_models_lower:
-                filtered_models.append(model_name)
+
+        for model_name_lower in selected_models_lower:
+            if model_name_lower in param_preds_lower:
+                orig_name, pred_value = param_preds_lower[model_name_lower]
+                error = param_uncerts_lower.get(model_name_lower, 0)
+                filtered_models.append(orig_name)
                 filtered_values.append(pred_value)
-                filtered_errors.append(param_uncerts.get(model_name, 0))
-                filtered_colors.append(model_colors.get(model_name_lower.capitalize(), '#9467bd'))  # Púrpura por defecto
-        
+                filtered_errors.append(error)
+                # Color según clave original (con mayúscula inicial)
+                color_key = orig_name.lower().capitalize()
+                filtered_colors.append(model_colors.get(color_key, '#9467bd'))  # Púrpura por defecto
+
         if not filtered_models:
             ax.text(0.5, 0.5, 'No selected models for this parameter', 
                    ha='center', va='center', transform=ax.transAxes, fontsize=12)
             ax.set_title(f'{get_param_label(param)} - No selected models', 
                         fontfamily='Times New Roman', fontsize=14, fontweight='bold')
             continue
-
 
         x_pos = np.arange(len(filtered_models))
         # Solo agregar barras de error para Random Forest
@@ -633,14 +639,13 @@ def create_summary_plot(predictions, uncertainties, param_names, param_labels, s
         if expected_values and param in expected_values and expected_values[param]['value'] is not None:
             exp_value = expected_values[param]['value']
             exp_error = expected_values[param].get('error', 0)
-            
 
             ax.axhline(y=exp_value, color='red', linestyle='-', linewidth=2, alpha=0.8, label='Expected value')
 
             if exp_error > 0:
                 ax.axhspan(exp_value - exp_error, exp_value + exp_error, 
                           alpha=0.2, color='red', label='Expected range')
-        
+
         ax.set_xlabel('Model', fontfamily='Times New Roman', fontsize=12)
         ax.set_ylabel(f'Predicted Value {param_label} ({units})', fontfamily='Times New Roman', fontsize=12)
         ax.set_title(f'{param_label} Predictions', 
@@ -648,7 +653,7 @@ def create_summary_plot(predictions, uncertainties, param_names, param_labels, s
         ax.set_xticks(x_pos)
         ax.set_xticklabels(filtered_models, rotation=45, ha='right', fontsize=10)
         ax.grid(alpha=0.3, axis='y', linestyle='--')
-        
+
         # Add value labels on bars para todos los modelos (caja amarilla), pero solo mostrar ± error para RandomForest
         ylim = ax.get_ylim()
         y_max = max([bar.get_height() + err for bar, err in zip(bars, filtered_errors)] + [ylim[1]])
@@ -669,7 +674,7 @@ def create_summary_plot(predictions, uncertainties, param_names, param_labels, s
                     label_text, ha='center', va=va, 
                     fontweight='bold', fontsize=9, bbox=dict(boxstyle="round,pad=0.3", 
                     facecolor="yellow", alpha=0.7), clip_on=True)
-        
+
         # Add legend if expected value is shown
         if expected_values and param in expected_values and expected_values[param]['value'] is not None:
             ax.legend(loc='upper right')
@@ -1287,3 +1292,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+c
