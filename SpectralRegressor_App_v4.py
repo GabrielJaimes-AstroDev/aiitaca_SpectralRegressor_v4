@@ -1,4 +1,5 @@
 import os
+import json
 import numpy as np
 import pandas as pd
 import joblib
@@ -96,7 +97,7 @@ This application predicts physical parameters of astronomical spectra using mach
 Upload a spectrum file and trained models to get predictions.
 """)
 
-# Mostrar panel de información de modelos si ya están cargados
+# Show model information panel if models are already loaded
 if 'models_loaded' in st.session_state and st.session_state['models_loaded']:
     models = st.session_state['models_obj']
     with st.expander("Model Information", expanded=True):
@@ -121,49 +122,133 @@ if 'models_loaded' in st.session_state and st.session_state['models_loaded']:
 # Function to load models (with caching for better performance)
 @st.cache_resource
 def load_models_from_zip(zip_file):
-    """Load all models and scalers from a ZIP file"""
+    """Load all models, scalers and metadata from packaged models.zip.
+
+    Supports the new packaging format where each model .save may contain either:
+      - A raw estimator object with predict()
+      - A dict {'model': estimator, 'metrics': {...}}
+    """
     models = {}
-    
-    # Create a temporary directory to extract files
+
     with tempfile.TemporaryDirectory() as temp_dir:
         try:
-            # Extract the ZIP file
-            with zipfile.ZipFile(zip_file, 'r') as zip_ref:
-                zip_ref.extractall(temp_dir)
-            
-            # Load main scaler and PCA
-            models['scaler'] = joblib.load(os.path.join(temp_dir, "standard_scaler.save"))
-            models['ipca'] = joblib.load(os.path.join(temp_dir, "incremental_pca.save"))
-            
-            # Load parameter scalers
+            # Extract
+            with zipfile.ZipFile(zip_file, 'r') as zf:
+                zf.extractall(temp_dir)
+
+            # Load metadata if present
+            metadata_path = os.path.join(temp_dir, 'metadata.json')
+            metadata = None
+            if os.path.exists(metadata_path):
+                try:
+                    with open(metadata_path, 'r', encoding='utf-8') as mf:
+                        metadata = json.load(mf)
+                except Exception as e:
+                    st.warning(f"Failed to parse metadata.json: {e}")
+
+            # Load PCA & scaler (fallback ordering)
+            scaler_candidates = [
+                'main_scaler.save',
+                'standard_scaler.save'
+            ]
+            scaler_obj = None
+            for cand in scaler_candidates:
+                p = os.path.join(temp_dir, cand)
+                if os.path.exists(p):
+                    scaler_obj = joblib.load(p)
+                    break
+            if scaler_obj is None:
+                return None, "✗ Scaler file not found in zip"
+            models['scaler'] = scaler_obj
+
+            pca_path = os.path.join(temp_dir, 'incremental_pca.save')
+            if not os.path.exists(pca_path):
+                return None, "✗ incremental_pca.save not found in zip"
+            models['ipca'] = joblib.load(pca_path)
+
+            # Frequencies & EVR (optional)
+            freq_path = os.path.join(temp_dir, 'reference_frequencies.npy')
+            if os.path.exists(freq_path):
+                try:
+                    models['frequencies'] = np.load(freq_path)
+                except Exception:
+                    pass
+            evr_path = os.path.join(temp_dir, 'explained_variance_ratio.npy')
+            if os.path.exists(evr_path):
+                try:
+                    models['explained_variance_ratio'] = np.load(evr_path)
+                except Exception:
+                    pass
+
+            # Parameter scalers
             param_names = ['logn', 'tex', 'velo', 'fwhm']
-            models['param_scalers'] = {}
-            
+            param_scalers = {}
             for param in param_names:
-                scaler_path = os.path.join(temp_dir, f"{param}_scaler.save")
-                if os.path.exists(scaler_path):
-                    models['param_scalers'][param] = joblib.load(scaler_path)
-            
-            # Load trained models
-            models['all_models'] = {}
-            model_types = ['randomforest', 'gradientboosting', 'lightgbm', 'xgboost']
-            
-            for param in param_names:
-                param_models = {}
-                for model_type in model_types:
-                    model_path = os.path.join(temp_dir, f"{param}_{model_type}.save")
-                    if os.path.exists(model_path):
-                        try:
-                            model = joblib.load(model_path)
-                            param_models[model_type.capitalize()] = model
-                        except Exception as e:
-                            st.warning(f"Error loading {param}_{model_type}.save: {str(e)}")
-                models['all_models'][param] = param_models
-                    
-            return models, "✓ Models loaded successfully"
-            
+                spath = os.path.join(temp_dir, f"{param}_scaler.save")
+                if os.path.exists(spath):
+                    try:
+                        param_scalers[param] = joblib.load(spath)
+                    except Exception as e:
+                        st.warning(f"Failed loading scaler for {param}: {e}")
+            models['param_scalers'] = param_scalers
+
+            # Load model files: any file shaped param_model.save
+            models['all_models'] = {p: {} for p in param_names}
+            for fname in os.listdir(temp_dir):
+                if not fname.endswith('.save'):
+                    continue
+                if fname in ['standard_scaler.save', 'main_scaler.save', 'incremental_pca.save']:
+                    continue
+                # Skip parameter-specific scalers so they are not interpreted as models
+                if any(fname == f"{p}_scaler.save" for p in param_names):
+                    continue
+                # param prefix
+                parts = fname.split('_', 1)
+                if len(parts) != 2:
+                    continue
+                param, rest = parts
+                if param not in param_names:
+                    continue
+                model_key = rest[:-5]  # strip .save
+                fpath = os.path.join(temp_dir, fname)
+                try:
+                    obj = joblib.load(fpath)
+                    # Unwrap packaged dict
+                    if isinstance(obj, dict) and 'model' in obj:
+                        estimator = obj['model']
+                        metrics = obj.get('metrics')
+                    else:
+                        estimator = obj
+                        metrics = None
+
+                    # Normalize key names to UI style (Randomforest, Gradientboosting, Lightgbm, Xgboost)
+                    norm_map = {
+                        'randomforest': 'Randomforest',
+                        'gradientboosting': 'Gradientboosting',
+                        'lightgbm': 'Lightgbm',
+                        'xgboost': 'Xgboost'
+                    }
+                    mk_lower = model_key.lower()
+                    ui_key = norm_map.get(mk_lower, model_key.capitalize())
+                    models['all_models'][param][ui_key] = estimator
+                    # Optionally store metrics
+                    if metrics:
+                        if 'model_metrics' not in models:
+                            models['model_metrics'] = {}
+                        models['model_metrics'].setdefault(param, {})[ui_key] = metrics
+                except Exception as e:
+                    st.warning(f"Error loading model {fname}: {e}")
+
+            # Attach metadata if useful
+            if metadata:
+                models['metadata'] = metadata
+                # If metadata provides param names override default
+                if 'param_names' in metadata:
+                    models['param_names'] = metadata['param_names']
+
+            return models, "✓ Models loaded correctly"
         except Exception as e:
-            return None, f"✗ Error loading models: {str(e)}"
+            return None, f"✗ Error loading models: {e}"
 
 def get_units(param):
     """Get units for each parameter"""
@@ -420,10 +505,9 @@ def process_spectrum(spectrum_file, models, target_length=64607):
                         except Exception as e:
                             st.warning(f"Error in staged prediction for {model_name}: {e}")
                     
-                    # For LightGBM and XGBoost, use a default uncertainty
+                    # For LightGBM and XGBoost we do not assign an artificial uncertainty; sqrt(Test_MSE) will be used in plots
                     elif model_name in ['Lightgbm', 'Xgboost']:
-                        # Use a percentage-based uncertainty
-                        uncertainty = abs(y_pred_orig[0]) * 0.05  # 5% uncertainty
+                        uncertainty = np.nan
                     
                     param_predictions[model_name] = y_pred_orig[0]
                     param_uncertainties[model_name] = uncertainty
@@ -451,8 +535,14 @@ def process_spectrum(spectrum_file, models, target_length=64607):
         st.error(f"Error processing the spectrum: {e}")
         return None
 
-def create_comparison_plot(predictions, uncertainties, param, label, spectrum_name, selected_models):
-    """Create comparison plot for a parameter"""
+def create_comparison_plot(predictions, uncertainties, param, label, spectrum_name, selected_models, model_metrics=None):
+    """Create comparison plot for a parameter.
+
+    Uncertainty policy:
+    - RandomForest: standard deviation of individual estimators (pre-calculated) if available; otherwise fallback to sqrt(Test_MSE).
+    - Other models: use sqrt(Test_MSE).
+    - If Test_MSE is missing -> no error bar.
+    """
     fig, ax = plt.subplots(figsize=(10, 8))
 
     param_preds = predictions[param]
@@ -494,17 +584,36 @@ def create_comparison_plot(predictions, uncertainties, param, label, spectrum_na
         if model_name not in selected_models:
             continue
 
-        mean_true = pred_value  # Use the predicted value itself
-        uncert_value = param_uncerts.get(model_name, 0)
+        mean_true = pred_value  # Use the predicted value as reference
+        # Determine uncertainty according to the policy
+        base_uncert = param_uncerts.get(model_name, None)
+        uncert_value = None
+        # If it is RandomForest and base_uncert is valid, use it directly
+        if model_name.lower() == 'randomforest' and isinstance(base_uncert, (int, float)) and np.isfinite(base_uncert) and base_uncert >= 0:
+            uncert_value = float(base_uncert)
+        else:
+            # For other models (or RF fallback) look up Test_MSE
+            if model_metrics and param in model_metrics and model_name in model_metrics[param]:
+                test_mse_val = (model_metrics[param][model_name].get('test_mse') or
+                                model_metrics[param][model_name].get('Test_MSE'))
+                try:
+                    if test_mse_val is not None:
+                        tv = float(test_mse_val)
+                        if tv >= 0:
+                            uncert_value = float(np.sqrt(tv))
+                except (TypeError, ValueError):
+                    uncert_value = None
 
-        ax.scatter(mean_true, pred_value, color=colors[model_count % len(colors)], 
+        if uncert_value is None or not (isinstance(uncert_value, (int, float)) and np.isfinite(uncert_value)):
+            uncert_value = 0.0
+
+        ax.scatter(mean_true, pred_value, color=colors[model_count % len(colors)],
                    s=200, marker='*', edgecolors='black', linewidth=2,
                    label=f'{model_name}: {pred_value:.3f} ± {uncert_value:.3f}')
 
-        # Solo mostrar barras de error para Random Forest
-        if model_name.lower() == 'randomforest':
-            ax.errorbar(mean_true, pred_value, yerr=uncert_value, 
-                        fmt='none', ecolor=colors[model_count % len(colors)], 
+        if uncert_value > 0:
+            ax.errorbar(mean_true, pred_value, yerr=uncert_value,
+                        fmt='none', ecolor=colors[model_count % len(colors)],
                         capsize=8, capthick=2, elinewidth=3, alpha=0.8)
 
         model_count += 1
@@ -526,11 +635,18 @@ def create_comparison_plot(predictions, uncertainties, param, label, spectrum_na
     plt.tight_layout()
     return fig
 
-def create_combined_plot(predictions, uncertainties, param_names, param_labels, spectrum_name, selected_models):
-    """Create combined plot showing all parameter predictions with uncertainty"""
+def create_combined_plot(predictions, uncertainties, param_names, param_labels, spectrum_name, selected_models, model_metrics=None):
+    """Create combined plot similar to the summary plot.
+
+    Updated uncertainty policy:
+    - RandomForest: use standard deviation of estimators (pre-calculated) if it exists and is valid.
+    - Other models: use sqrt(Test_MSE) if available.
+    - If the metric is not available -> no error bar.
+    - RandomForest without a valid std but with Test_MSE -> fallback to sqrt(Test_MSE).
+    """
     fig, axes = plt.subplots(2, 2, figsize=(16, 14))
     axes = axes.flatten()
-    # Definir colores por modelo para consistencia
+    # Define colors per model for consistency
     model_colors = {
         'Randomforest': 'blue',
         'Gradientboosting': 'green',
@@ -543,9 +659,9 @@ def create_combined_plot(predictions, uncertainties, param_names, param_labels, 
         param_preds = predictions[param]
         param_uncerts = uncertainties[param]
 
-        # Normalizar nombres de modelos a minúsculas para comparación
+    # Normalize model names to lowercase for comparison
         selected_models_lower = [m.lower() for m in selected_models]
-        # Crear un mapeo de nombre normalizado a nombre original para anotaciones
+    # Create a mapping from normalized name to original for annotations
         param_preds_lower = {k.lower(): (k, v) for k, v in param_preds.items()}
         param_uncerts_lower = {k.lower(): v for k, v in param_uncerts.items()}
 
@@ -557,13 +673,34 @@ def create_combined_plot(predictions, uncertainties, param_names, param_labels, 
         for model_name_lower in selected_models_lower:
             if model_name_lower in param_preds_lower:
                 orig_name, pred_value = param_preds_lower[model_name_lower]
-                err = param_uncerts_lower.get(model_name_lower, 0.0)
-                # Sanitizar errores no numéricos/NaN
-                if err is None or not (isinstance(err, (int, float)) and np.isfinite(err)):
-                    err = 0.0
+
+                rf_uncert = None
+                if model_name_lower == 'randomforest':
+                    try:
+                        cand = param_uncerts_lower.get(model_name_lower, None)
+                        if isinstance(cand, (int, float)) and np.isfinite(cand) and cand >= 0:
+                            rf_uncert = float(cand)
+                    except Exception:
+                        rf_uncert = None
+
+                err_val = rf_uncert
+                if (err_val is None) and model_metrics and param in model_metrics and orig_name in model_metrics[param]:
+                    test_mse = (model_metrics[param][orig_name].get('test_mse') or
+                                model_metrics[param][orig_name].get('Test_MSE'))
+                    try:
+                        if test_mse is not None:
+                            tv = float(test_mse)
+                            if tv >= 0:
+                                err_val = float(np.sqrt(tv))
+                    except (TypeError, ValueError):
+                        pass
+
+                if err_val is None or not (isinstance(err_val, (int, float)) and np.isfinite(err_val)):
+                    err_val = 0.0
+
                 filtered_models.append(orig_name)
                 filtered_values.append(pred_value)
-                filtered_errors.append(err)
+                filtered_errors.append(err_val)
                 color_key = orig_name.lower().capitalize()
                 filtered_colors.append(model_colors.get(color_key, '#9467bd'))
 
@@ -575,11 +712,8 @@ def create_combined_plot(predictions, uncertainties, param_names, param_labels, 
             continue
 
         x_pos = np.arange(len(filtered_models))
-        # Solo mostrar barras de error para Random Forest y con errores finitos
-        error_array = [
-            err if (name.lower() == 'randomforest' and isinstance(err, (int, float)) and np.isfinite(err)) else 0.0
-            for name, err in zip(filtered_models, filtered_errors)
-        ]
+    # filtered_errors already respects the new policy
+        error_array = filtered_errors
 
         bars = ax.bar(
             x_pos, filtered_values,
@@ -597,12 +731,12 @@ def create_combined_plot(predictions, uncertainties, param_names, param_labels, 
         ax.set_xticklabels(filtered_models, rotation=45, ha='right', fontsize=10)
         ax.grid(alpha=0.3, axis='y', linestyle='--')
 
-        # Ajustar ylim usando exactamente los errores que se pintan (error_array)
+    # Adjust ylim using exactly the drawn errors (error_array)
         ylim = ax.get_ylim()
         y_max = max([bar.get_height() + err for bar, err in zip(bars, error_array)] + [ylim[1]])
         ax.set_ylim(ylim[0], y_max + 0.15 * abs(y_max))
 
-        # Etiquetas amarillas siempre visibles; ± solo para RandomForest
+    # Labels: show ± if err > 0
         for bar, value, err, name in zip(bars, filtered_values, error_array, filtered_models):
             height = bar.get_height()
             y_text = height + err + 0.1
@@ -610,10 +744,7 @@ def create_combined_plot(predictions, uncertainties, param_names, param_labels, 
             if y_text > ax.get_ylim()[1]:
                 y_text = height - err - 0.1
                 va = 'top'
-            if name.lower() == 'randomforest' and err != 0:
-                label_text = f'{value:.3f} ± {err:.3f}'
-            else:
-                label_text = f'{value:.3f}'
+            label_text = f'{value:.3f} ± {err:.3f}' if err > 0 else f'{value:.3f}'
             ax.text(
                 bar.get_x() + bar.get_width()/2., y_text,
                 label_text, ha='center', va=va,
@@ -627,25 +758,29 @@ def create_combined_plot(predictions, uncertainties, param_names, param_labels, 
     plt.tight_layout()
     return fig
 
-def create_summary_plot(predictions, uncertainties, param_names, param_labels, selected_models, expected_values=None):
-    """Create a summary plot showing all parameter predictions in one figure"""
+def create_summary_plot(predictions, uncertainties, param_names, param_labels, selected_models, expected_values=None, model_metrics=None):
+    """Create a summary plot showing all parameter predictions with error bars.
+
+Updated requirement:
+- RandomForest: Uses the previously calculated uncertainty (standard deviation of the estimators) if available and finite.
+- Other models: Use sqrt(Test_MSE) taken from model_metrics (key 'test_mse' or 'Test_MSE').
+- If there is no Test_MSE for a model (not RF) -> no error bar.
+- If RandomForest has no valid uncertainty but there is a Test_MSE -> sqrt(Test_MSE) fallback.
+"""
     fig, axes = plt.subplots(2, 2, figsize=(16, 14))
     axes = axes.flatten()
     model_colors = {
-        'Randomforest':'blue',  # Azul
-        'Gradientboosting': 'green',  # Verde
-        'Lightgbm': 'orange',  # Naranja
-        'Xgboost': 'purple'  # Púrpura
+        'Randomforest': 'blue',
+        'Gradientboosting': 'green',
+        'Lightgbm': 'orange',
+        'Xgboost': 'purple'
     }
-    
+
     for idx, (param, label) in enumerate(zip(param_names, param_labels)):
         ax = axes[idx]
-        param_preds = predictions[param]
-        param_uncerts = uncertainties[param]
-
-        # Normalizar nombres de modelos a minúsculas para comparación
+        param_preds = predictions.get(param, {})
+        param_uncerts = uncertainties.get(param, {})
         selected_models_lower = [m.lower() for m in selected_models]
-        # Crear un mapeo de nombre normalizado a nombre original para anotaciones
         param_preds_lower = {k.lower(): (k, v) for k, v in param_preds.items()}
         param_uncerts_lower = {k.lower(): v for k, v in param_uncerts.items()}
 
@@ -657,35 +792,56 @@ def create_summary_plot(predictions, uncertainties, param_names, param_labels, s
         for model_name_lower in selected_models_lower:
             if model_name_lower in param_preds_lower:
                 orig_name, pred_value = param_preds_lower[model_name_lower]
-                err = param_uncerts_lower.get(model_name_lower, 0.0)
-                # Sanitizar errores no numéricos/NaN
-                if err is None or not (isinstance(err, (int, float)) and np.isfinite(err)):
-                    err = 0.0
+
+                # 1) Try to use pre-calculated uncertainty for RandomForest
+                base_uncert = None
+                if model_name_lower == 'randomforest':
+                    # uncertainties[param] stores the estimators standard deviation if it was computed
+                    try:
+                        base_uncert_candidate = param_uncerts_lower.get(model_name_lower, None)
+                        if isinstance(base_uncert_candidate, (int, float)) and np.isfinite(base_uncert_candidate) and base_uncert_candidate >= 0:
+                            base_uncert = float(base_uncert_candidate)
+                    except Exception:
+                        base_uncert = None
+
+                err_val = 0.0
+                # 2) If not RandomForest or no valid base_uncert -> use sqrt(Test_MSE)
+                if (model_name_lower != 'randomforest') or (base_uncert is None):
+                    if model_metrics and param in model_metrics and orig_name in model_metrics[param]:
+                        metrics_dict = model_metrics[param][orig_name]
+                        test_mse = metrics_dict.get('test_mse') or metrics_dict.get('Test_MSE')
+                        if test_mse is not None:
+                            try:
+                                val = float(test_mse)
+                                if val >= 0:
+                                    err_val = float(np.sqrt(val))
+                            except (TypeError, ValueError):
+                                pass
+                # 3) If RandomForest and a valid base_uncert exists, keep it
+                if base_uncert is not None:
+                    err_val = base_uncert
+
                 filtered_models.append(orig_name)
                 filtered_values.append(pred_value)
-                filtered_errors.append(err)
+                filtered_errors.append(err_val)
                 color_key = orig_name.lower().capitalize()
                 filtered_colors.append(model_colors.get(color_key, '#9467bd'))
 
         if not filtered_models:
-            ax.text(0.5, 0.5, 'No selected models for this parameter', 
-                    ha='center', va='center', transform=ax.transAxes, fontsize=12)
-            ax.set_title(f'{get_param_label(param)} - No selected models', 
-                         fontfamily='Times New Roman', fontsize=14, fontweight='bold')
+            ax.text(0.5, 0.5, 'No selected models', ha='center', va='center', transform=ax.transAxes)
+            ax.set_title(get_param_label(param), fontfamily='Times New Roman', fontsize=14, fontweight='bold')
             continue
 
         x_pos = np.arange(len(filtered_models))
-        # Solo mostrar barras de error para Random Forest y con errores finitos
-        error_array = [
-            err if (name.lower() == 'randomforest' and isinstance(err, (int, float)) and np.isfinite(err)) else 0.0
-            for name, err in zip(filtered_models, filtered_errors)
-        ]
+        error_array = []
+        for name, err in zip(filtered_models, filtered_errors):
+            if isinstance(err, (int, float)) and np.isfinite(err) and err > 0:
+                error_array.append(err)
+            else:
+                error_array.append(0.0)
 
-        bars = ax.bar(
-            x_pos, filtered_values,
-            yerr=error_array, capsize=8, alpha=0.8,
-            color=filtered_colors, edgecolor='black', linewidth=1
-        )
+        bars = ax.bar(x_pos, filtered_values, yerr=error_array, capsize=8, alpha=0.8,
+                      color=filtered_colors, edgecolor='black', linewidth=1)
 
         param_label = get_param_label(param)
         units = get_units(param)
@@ -693,44 +849,34 @@ def create_summary_plot(predictions, uncertainties, param_names, param_labels, s
         if expected_values and param in expected_values and expected_values[param]['value'] is not None:
             exp_value = expected_values[param]['value']
             exp_error = expected_values[param].get('error', 0)
-            ax.axhline(y=exp_value, color='red', linestyle='-', linewidth=2, alpha=0.8, label='Expected value')
+            ax.axhline(y=exp_value, color='red', linestyle='-', linewidth=2, alpha=0.8, label='Expected')
             if exp_error and np.isfinite(exp_error) and exp_error > 0:
-                ax.axhspan(exp_value - exp_error, exp_value + exp_error, alpha=0.2, color='red', label='Expected range')
+                ax.axhspan(exp_value - exp_error, exp_value + exp_error, alpha=0.2, color='red')
 
         ax.set_xlabel('Model', fontfamily='Times New Roman', fontsize=12)
-        ax.set_ylabel(f'Predicted Value {param_label} ({units})', fontfamily='Times New Roman', fontsize=12)
+        ax.set_ylabel(f'Predicted {param_label} ({units})', fontfamily='Times New Roman', fontsize=12)
         ax.set_title(f'{param_label} Predictions', fontfamily='Times New Roman', fontsize=14, fontweight='bold')
         ax.set_xticks(x_pos)
         ax.set_xticklabels(filtered_models, rotation=45, ha='right', fontsize=10)
         ax.grid(alpha=0.3, axis='y', linestyle='--')
 
-        # Siempre dibujar la caja amarilla para cada barra, usando exactamente los errores que se pintan (error_array)
         ylim = ax.get_ylim()
         y_max = max([bar.get_height() + err for bar, err in zip(bars, error_array)] + [ylim[1]])
         ax.set_ylim(ylim[0], y_max + 0.15 * abs(y_max))
         for bar, value, err, name in zip(bars, filtered_values, error_array, filtered_models):
             height = bar.get_height()
             y_text = height + err + 0.1
-            va = 'bottom'
             if y_text > ax.get_ylim()[1]:
                 y_text = height - err - 0.1
-                va = 'top'
-            # Mostrar ± error solo para RandomForest
-            if name.lower() == 'randomforest' and err != 0:
-                label_text = f'{value:.3f} ± {err:.3f}'
-            else:
-                label_text = f'{value:.3f}'
-            ax.text(
-                bar.get_x() + bar.get_width()/2., y_text,
-                label_text, ha='center', va=va,
-                fontweight='bold', fontsize=9, bbox=dict(boxstyle="round,pad=0.3", 
-                facecolor="yellow", alpha=0.7), clip_on=True)
+            label_text = f'{value:.3f} ± {err:.3f}' if err > 0 else f'{value:.3f}'
+            ax.text(bar.get_x() + bar.get_width()/2., y_text, label_text,
+                    ha='center', va='bottom', fontsize=9, fontweight='bold',
+                    bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
 
         if expected_values and param in expected_values and expected_values[param]['value'] is not None:
             ax.legend(loc='upper right')
-    
-    plt.suptitle('Summary of Parameter Predictions', 
-                fontfamily='Times New Roman', fontsize=16, fontweight='bold')
+
+    plt.suptitle('Summary of Parameter Predictions', fontfamily='Times New Roman', fontsize=16, fontweight='bold')
     plt.tight_layout()
     return fig
 
@@ -1130,26 +1276,24 @@ def main():
                         name='Filtered Spectrum'
                     ))
                     fig.update_layout(
-                        title="Filtered Spectrum",
-                        xaxis_title="<i>Frequency</i> (GHz)",
-                        yaxis_title="<i>Intensity</i> (K)",
-                        template="simple_white",
-                        font=dict(family="Times New Roman", size=16, color="black"),
-                        height=500,
+                        title=dict(text="Filtered Spectrum", font=dict(family="Times New Roman", size=20, color="black")),
                         xaxis=dict(
+                            title=dict(text="<i>Frequency</i> (GHz)", font=dict(family="Times New Roman", size=18, color="black")),
                             showgrid=True,
                             gridcolor='lightgray',
-                            titlefont=dict(family="Times New Roman", size=18, color="black"),
                             tickfont=dict(family="Times New Roman", size=14, color="black"),
                             color="black"
                         ),
                         yaxis=dict(
+                            title=dict(text="<i>Intensity</i> (K)", font=dict(family="Times New Roman", size=18, color="black")),
                             showgrid=True,
                             gridcolor='lightgray',
-                            titlefont=dict(family="Times New Roman", size=18, color="black"),
                             tickfont=dict(family="Times New Roman", size=14, color="black"),
                             color="black"
-                        )
+                        ),
+                        template="simple_white",
+                        font=dict(family="Times New Roman", size=16, color="black"),
+                        height=500
                     )
 
                     st.plotly_chart(fig, use_container_width=True)
@@ -1166,36 +1310,36 @@ def main():
                         name='PCA Component Value'
                     ))
                     fig_pca_bar.update_layout(
-                        title="Spectrum Representation in PCA Space",
-                        xaxis_title="PCA Component",
-                        yaxis_title="Value",
-                        template="simple_white",
-                        font=dict(family="Times New Roman", size=16, color="black"),
-                        height=400,
+                        title=dict(text="Spectrum Representation in PCA Space", font=dict(family="Times New Roman", size=18, color="black")),
                         xaxis=dict(
+                            title=dict(text="PCA Component", font=dict(family="Times New Roman", size=16, color="black")),
                             showgrid=True,
                             gridcolor='lightgray',
-                            titlefont=dict(family="Times New Roman", size=16, color="black"),
                             tickfont=dict(family="Times New Roman", size=14, color="black"),
                             color="black"
                         ),
                         yaxis=dict(
+                            title=dict(text="Value", font=dict(family="Times New Roman", size=16, color="black")),
                             showgrid=True,
                             gridcolor='lightgray',
-                            titlefont=dict(family="Times New Roman", size=16, color="black"),
                             tickfont=dict(family="Times New Roman", size=14, color="black"),
                             color="black"
-                        )
+                        ),
+                        template="simple_white",
+                        font=dict(family="Times New Roman", size=16, color="black"),
+                        height=400
                     )
                     st.plotly_chart(fig_pca_bar, use_container_width=True)
 
 
-                    subtab1, subtab2, subtab3, subtab4 = st.tabs(["Summary", "Model Performance", "Individual Plots", "Combined Plot"])
+                    subtab1, subtab2, subtab3, subtab4, subtab5 = st.tabs(["Summary", "Model Performance", "Individual Plots", "Combined Plot", "Metrics"])
                     with subtab1:
                         st.subheader("Prediction Summary")
+                        st.caption("Incertidumbre: RandomForest usa la desviación estándar de sus estimadores; otros modelos usan sqrt(Test_MSE). Si falta la métrica no se muestra barra.")
                         
                         summary_data = []
                         selected_models_lower = [m.lower() for m in st.session_state.selected_models]
+                        metrics_dict_global = models.get('model_metrics')
                         for param, label in zip(results['param_names'], results['param_labels']):
                             if param in results['predictions']:
                                 param_preds = results['predictions'][param]
@@ -1203,14 +1347,34 @@ def main():
                                 for model_name, pred_value in param_preds.items():
                                     if model_name.lower() not in selected_models_lower:
                                         continue
-                                    uncert_value = param_uncerts.get(model_name, np.nan)
+                                    # 1) RandomForest: usar std de estimadores si válida
+                                    rf_uncert = None
+                                    if model_name.lower() == 'randomforest':
+                                        try:
+                                            cand = param_uncerts.get(model_name, None)
+                                            if isinstance(cand, (int, float)) and np.isfinite(cand) and cand >= 0:
+                                                rf_uncert = float(cand)
+                                        except Exception:
+                                            rf_uncert = None
+                                    # 2) Otros (o fallback): sqrt(Test_MSE)
+                                    final_uncert = rf_uncert
+                                    if (final_uncert is None) and metrics_dict_global and param in metrics_dict_global and model_name in metrics_dict_global[param]:
+                                        test_mse_val = metrics_dict_global[param][model_name].get('test_mse') or metrics_dict_global[param][model_name].get('Test_MSE')
+                                        try:
+                                            if test_mse_val is not None:
+                                                tv = float(test_mse_val)
+                                                if tv >= 0:
+                                                    final_uncert = np.sqrt(tv)
+                                        except (TypeError, ValueError):
+                                            pass
+                                    rel_err = (final_uncert / abs(pred_value) * 100) if pred_value != 0 and isinstance(final_uncert, (int, float)) and np.isfinite(final_uncert) else np.nan
                                     summary_data.append({
                                         'Parameter': label,
                                         'Model': model_name,
                                         'Prediction': pred_value,
-                                        'Uncertainty': uncert_value if not np.isnan(uncert_value) else 'N/A',
+                                        'Uncertainty': final_uncert if isinstance(final_uncert, (int, float)) and np.isfinite(final_uncert) else 'N/A',
                                         'Units': get_units(param),
-                                        'Relative_Error_%': (uncert_value / abs(pred_value) * 100) if pred_value != 0 and not np.isnan(uncert_value) else np.nan
+                                        'Relative_Error_%': rel_err
                                     })
                         
                         if summary_data:
@@ -1244,9 +1408,41 @@ def main():
                             results['param_names'],
                             results['param_labels'],
                             [m for m in st.session_state.selected_models],
-                            st.session_state.expected_values if has_expected_values else None
+                            st.session_state.expected_values if has_expected_values else None,
+                            model_metrics=models.get('model_metrics')
                         )
                         st.pyplot(summary_fig)
+                    with subtab5:
+                        st.subheader("Model Metrics (R² / MSE)")
+                        mm = models.get('model_metrics')
+                        if not mm:
+                            st.info("No metrics were packaged with the loaded models.")
+                        else:
+                            rows = []
+                            for param, model_dict in mm.items():
+                                for model_name, metrics_dict in model_dict.items():
+                                    rows.append({
+                                        'Parameter': param,
+                                        'Model': model_name,
+                                        'Train_R2': metrics_dict.get('train_r2'),
+                                        'Val_R2': metrics_dict.get('val_r2'),
+                                        'Test_R2': metrics_dict.get('test_r2'),
+                                        'Train_MSE': metrics_dict.get('train_mse'),
+                                        'Val_MSE': metrics_dict.get('val_mse'),
+                                        'Test_MSE': metrics_dict.get('test_mse')
+                                    })
+                            if rows:
+                                metrics_df = pd.DataFrame(rows)
+                                st.dataframe(metrics_df, use_container_width=True)
+                                csv_m = metrics_df.to_csv(index=False)
+                                st.download_button(
+                                    label="📥 Download metrics CSV",
+                                    data=csv_m,
+                                    file_name=f"model_metrics_{selected_filter}.csv",
+                                    mime="text/csv"
+                                )
+                            else:
+                                st.warning("Metrics dictionary is empty.")
                         
                         buf = BytesIO()
                         summary_fig.savefig(buf, format="png", dpi=300, bbox_inches='tight')
@@ -1302,7 +1498,8 @@ def main():
                             results['param_names'],
                             results['param_labels'],
                             selected_filter,
-                            st.session_state.selected_models
+                            st.session_state.selected_models,
+                            model_metrics=models.get('model_metrics')
                         )
                         st.pyplot(fig)
                         
