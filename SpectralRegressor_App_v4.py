@@ -1335,7 +1335,7 @@ def main():
                     subtab1, subtab2, subtab3, subtab4, subtab5 = st.tabs(["Summary", "Model Performance", "Individual Plots", "Combined Plot", "Metrics"])
                     with subtab1:
                         st.subheader("Prediction Summary")
-                        st.caption("Incertidumbre: RandomForest usa la desviación estándar de sus estimadores; otros modelos usan sqrt(Test_MSE). Si falta la métrica no se muestra barra.")
+                        st.caption("Uncertainty: RandomForest uses the standard deviation of its estimators; other models use sqrt(Test_MSE). If the metric is missing, no bar is displayed.")
                         
                         summary_data = []
                         selected_models_lower = [m.lower() for m in st.session_state.selected_models]
@@ -1539,3 +1539,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
